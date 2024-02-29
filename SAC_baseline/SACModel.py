@@ -17,7 +17,10 @@ class SAC:
         self.act_dim = act_dim
         self.gamma = gamma
         self.polyak = polyak
-        self.alpha = alpha
+        self.log_alpha = torch.tensor(np.log(alpha)).to(self.device)
+        self.log_alpha.requires_grad = True
+        # set target entropy to -|A|
+        self.target_entropy = -act_dim
         self.capacity = replay_size
         self.time = 0
         act_bound = torch.FloatTensor(act_bound).to(device)
@@ -39,9 +42,15 @@ class SAC:
         # Set up optimizers for policy and q-function
         self.pi_optimizer = Adam(self.ac.pi.parameters(), lr=lr)
         self.q_optimizer = Adam(self.q_params, lr=lr)
-
+        self.log_alpha_optimizer = Adam([self.log_alpha],
+                                                    lr=1e-4)
+        self.learnable_temperature = True
         # Experience buffer
         self.replay_buffer = []
+
+    @property
+    def alpha(self):
+        return self.alpha.exp()
 
     def store(self,*sample):
         if len(self.replay_buffer) == self.capacity:
@@ -101,7 +110,12 @@ class SAC:
         #writer.add_scalar('-loss_pi', -loss_pi, global_step=self.time)
         # Useful info for logging
         #pi_info = dict(LogPi=logp_pi.detach().numpy())
-
+        if self.learnable_temperature:
+            self.log_alpha_optimizer.zero_grad()
+            alpha_loss = (self.alpha *
+                          (-log_prob - self.target_entropy).detach()).mean()
+            alpha_loss.backward()
+            self.log_alpha_optimizer.step()
         return loss_pi
     def update(self, batch_size):
         self.time += 1
