@@ -6,7 +6,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 if __name__ == '__main__':
-    env = gym.make('BipedalWalkerHardcore-v3')
+    env = gym.make('Pendulum-v1')
     obs_dim = env.observation_space.shape[0]
     act_dim = env.action_space.shape[0]
     act_bound = (env.action_space.high - env.action_space.low) / 2.0
@@ -18,14 +18,12 @@ if __name__ == '__main__':
     for episode in range(MAX_EPISODE):
         o = env.reset()
         ep_reward = 0
+        h_a, h_c = ddpg.init_hidden_state(batch_size=1, training=False)
         for j in range(MAX_STEP):
-            a = ddpg.get_action(o)
-            o2, r, d, _ = env.step(a)
-            env.render()
 
-            o = o2
+            a, h_a = ddpg.get_action(o, h_a)
+            o, r, d, _ = env.step(a.reshape(-1, ))
             ep_reward += r
-            t_step += 1
             if d:
                 break
-        print('Episode:', episode, 'Reward:%i' % int(ep_reward))
+        print(f"{episode} : {ep_reward}")

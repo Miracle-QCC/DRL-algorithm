@@ -9,7 +9,7 @@ class SAC:
 
         self.act_bound = act_bound
         self.ac = actor_critic(obs_dim, act_dim, act_limit=2.0).to(device)
-        self.ac.pi.load_state_dict(torch.load('actor_old.pht'))
+        self.ac.pi.load_state_dict(torch.load('actor_old.pt'))
     def get_action(self, o, deterministic=False):
         o = torch.FloatTensor(o).to(device)
         return self.ac.act(o,deterministic)

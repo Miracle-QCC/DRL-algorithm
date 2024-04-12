@@ -67,7 +67,7 @@ if __name__ == '__main__':
 
 
     data.to_csv("MetaDrive_MPSAC.csv")
-    torch.save(sac.ac.pi.state_dict(), 'MPSAC-actor.pht')
+    torch.save(sac.ac.pi.state_dict(), 'MPSAC-actor.pt')
     plt.figure()
     plt.plot(np.arange(len(rewardList)),rewardList)
     plt.show()

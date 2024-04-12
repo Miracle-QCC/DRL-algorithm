@@ -89,4 +89,3 @@ class Agent(object):
         with torch.no_grad():
             for p,p_targ in zip(self.ac.parameters(),self.ac_targ.parameters()):
                 p_targ.data.copy_(p_targ.data * self.tau + (1 - self.tau) * p.data)
-
