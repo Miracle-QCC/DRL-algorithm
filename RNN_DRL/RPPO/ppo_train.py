@@ -29,13 +29,13 @@ if __name__ == '__main__':
     data = pd.DataFrame(columns=['reward'])
     action_std_init = 0.6
     batch_size = 32
-
     ppo = PPO(obs_dim, act_dim,has_continuous_action_space=has_continuous_action_space,action_std_init=action_std_init, batch_size=batch_size)
     trainTimes = 0
     MAX_EPISODE = int(1000)
     MAX_STEP = 200
     K_epochs = 40
     look_setup = 20
+
     rewardList = []
     time_step = 0
     action_std_decay_rate = 0.05  # linearly decay action_std (action_std = action_std - action_std_decay_rate)
