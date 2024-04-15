@@ -16,60 +16,59 @@ hander.setFormatter(colorformat)
 logger.addHandler(hander)
 
 if __name__ == '__main__':
-    env = gym.make('CartPole-v1')
+    env = gym.make('Pendulum-v1')
     obs_dim = env.observation_space.shape[0]
-    # act_dim = env.action_space.shape[0]
-    act_dim = env.action_space.n
-    # act_bound = (env.action_space.high - env.action_space.low) / 2.0
+    try:
+        act_dim = env.action_space.shape[0]
+        has_continuous_action_space = True
+    except:
+        has_continuous_action_space = False
+        act_dim = env.action_space.n
 
     #Store experimental data
     data = pd.DataFrame(columns=['reward'])
-    has_continuous_action_space = False
-    action_std_init = 1.0
-    ppo = PPO(obs_dim, act_dim,has_continuous_action_space=has_continuous_action_space,action_std_init=action_std_init)
+    action_std_init = 0.6
+    batch_size = 16
+
+    ppo = PPO(obs_dim, act_dim,has_continuous_action_space=has_continuous_action_space,action_std_init=action_std_init, batch_size=batch_size)
     trainTimes = 0
     MAX_EPISODE = int(1000)
-    MAX_STEP = 1000
-    K_epochs = 80
+    MAX_STEP = 200
+    K_epochs = 10
+    look_setup = 20
     rewardList = []
     time_step = 0
-    look_setup = 40
-    batch_size = 256
     action_std_decay_rate = 0.05  # linearly decay action_std (action_std = action_std - action_std_decay_rate)
     min_action_std = 0.1  # minimum action_std (stop decay after action_std <= min_action_std)
-    action_std_decay_freq = int(2.5e5)  # action_std decay frequency (in num timesteps)
+    action_std_decay_freq = int(1e5)  # action_std decay frequency (in num timesteps)
     update_timestep = 4000
     save_model_freq = update_timestep * 10
     # training loop
     for episode in range(MAX_EPISODE):
         o = env.reset()
         ep_reward = 0
-        h_a,h_c = ppo.init_hidden_state(batch_size=1, training=False)
+        rooler_buffer = RolloutBuffer()
+        ha,hc = ppo.init_hidden_state(batch_size=1, training=False)
         for j in range(MAX_STEP):
             time_step += 1
-            a,h_a,h_c = ppo.get_action(o,h_a=h_a, h_c=h_c)
-            if has_continuous_action_space:
-                o2, r, d, _ = env.step(a.reshape(-1,))
-            else:
-                o2, r, d, _ = env.step(a)
-            if d:
-                r = -1
-            ppo.buffer.rewards.append(r)
-            ppo.buffer.is_terminals.append(d)
+            a,logp,s_v,ha,hc = ppo.get_action(o,h_a=ha,h_c=hc)
+            o2, r, d, _ = env.step(a)
+            # ppo.buffer.rewards.append(r)
+            # ppo.buffer.is_terminals.append(d)
+            rooler_buffer.store(o,a,r/10,s_v,logp)
             # ppo.buffer.store(o,a,r,state_val,action_logprob)
             o = o2
             ep_reward += r
             # update RPPO agent
-            if time_step % update_timestep == 0:
-                ppo.update(look_setup,batch_size)
-                trainTimes += K_epochs
             if has_continuous_action_space and time_step % action_std_decay_freq == 0:
                 ppo.decay_action_std(action_std_decay_rate, min_action_std)
             if d:
-                # ppo.update(look_setup, batch_size)
-                # trainTimes += K_epochs
                 break
-
+        rooler_buffer.finish_path()
+        ppo.buffer.append(rooler_buffer)
+        if len(ppo.buffer) == batch_size:
+            ppo.update(look_setup)
+            trainTimes += K_epochs
         data.loc[trainTimes,"reward"] = ep_reward
         writer.add_scalar('Pendulum-v1_ppo_my',ep_reward,global_step=trainTimes)
         logger.info('trainTimes: %d - Episode: %d - Reward:%f'%(trainTimes,episode,ep_reward))
