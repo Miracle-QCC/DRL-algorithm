@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.distributions import MultivariateNormal
 from torch.distributions import Categorical
 import numpy as np
+import scipy
 ################################## set device ##################################
 print("============================================================================================")
 # set device to cpu or cuda
@@ -17,22 +18,99 @@ print("=========================================================================
 
 
 ################################## RPPO Policy ##################################
+def discount_cumsum(x, discount):
+    """
+    magic from rllab for computing discounted cumulative sums of vectors.
+
+    input:
+        vector x,
+        [x0,
+         x1,
+         x2]
+
+    output:
+        [x0 + discount * x1 + discount^2 * x2,
+         x1 + discount * x2,
+         x2]
+    """
+    return scipy.signal.lfilter([1], [1, float(-discount)], x[::-1], axis=0)[::-1]
+
+
+################################## PPO Policy ##################################
+
 class RolloutBuffer:
-    def __init__(self):
+    def __init__(self, gamma=0.99, lamb=0.95):
         self.actions = []
         self.states = []
         self.logprobs = []
         self.rewards = []
         self.state_values = []
-        self.is_terminals = []
+        self.gamma = gamma
+        self.lamb = lamb
+
+    def store(self, obs, act, ret, s_v, logp):
+        self.states.append(obs)
+        self.actions.append(act)
+        self.rewards.append(ret)
+        self.state_values.append(s_v)
+        self.logprobs.append(logp)
+    def __len__(self):
+        return len(self.states)
+    def finish_path(self):
+        rewards = np.append(np.array(self.rewards), 0)
+        state_values = np.append(np.array(self.state_values), 0)
+
+        deltas = rewards[:-1] + self.gamma * state_values[1:] - state_values[:-1]
+        self.adv_buf = discount_cumsum(deltas, self.gamma * self.lamb).tolist()
+
+        # the next line computes rewards-to-go, to be targets for the value function
+        self.rewards = discount_cumsum(rewards, self.gamma)[:-1].tolist()
+
+
+class PPOBuffer:
+    def __init__(self, gamma=0.99, lamb=0.95):
+        self.memory = []
+
+    def __len__(self):
+        return len(self.memory)
 
     def clear(self):
-        del self.actions[:]
-        del self.states[:]
-        del self.logprobs[:]
-        del self.rewards[:]
-        del self.state_values[:]
-        del self.is_terminals[:]
+        del self.memory[:]
+
+    def append(self, rooler):
+        self.memory.append(rooler)
+
+    def sample(self, lookup_step=20):
+        obs = []
+        act = []
+        ret = []
+        adv = []
+        logp = []
+        bs = len(self.memory)
+        min_look = float('inf')
+        for rooler in self.memory:
+            min_look = min(min(len(rooler), lookup_step),min_look)
+
+        for rooler in self.memory:
+            if min_look > lookup_step:  # sample buffer with lookup_step size
+                idx = np.random.randint(0, min_look - lookup_step + 1)
+                obs.append(rooler.states[idx:idx+min_look])
+                act.append(rooler.actions[idx:idx+min_look])
+                ret.append(rooler.rewards[idx:idx+min_look])
+                adv.append(rooler.adv_buf[idx:idx+min_look])
+                logp.append(rooler.logprobs[idx:idx+min_look])
+            else:
+                idx = np.random.randint(0, len(rooler) - min_look + 1)
+                obs.append(rooler.states[idx:idx + min_look])
+                act.append(rooler.actions[idx:idx + min_look])
+                ret.append(rooler.rewards[idx:idx + min_look])
+                adv.append(rooler.adv_buf[idx:idx + min_look])
+                logp.append(rooler.logprobs[idx:idx + min_look])
+
+        data = dict(obs=obs, act=act, ret=ret,
+                    adv=adv, logp=logp)
+        return {k: torch.as_tensor(np.array(v), dtype=torch.float32, device=device).reshape(bs,min_look,-1) for k, v in data.items()}
+
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim,is_continous,hidden_size=128):
@@ -57,7 +135,7 @@ class Actor(nn.Module):
         return out,h
 
 class Critic(nn.Module):
-    def __init__(self,obs_dim,act_dim,hidden_size=128):
+    def __init__(self,obs_dim,hidden_size=128):
         super(Critic, self).__init__()
         self.fc1 = nn.Linear(obs_dim,hidden_size)
         # self.fc3 = nn.Linear(hidden_size,1)
@@ -82,7 +160,7 @@ class ActorCritic(nn.Module):
         # actor
         self.actor = Actor(state_dim,action_dim,has_continuous_action_space, hidden_space)
         # critic
-        self.critic = Critic(state_dim,action_dim,hidden_space)
+        self.critic = Critic(state_dim,hidden_space)
 
     def set_action_std(self, new_action_std):
         if self.has_continuous_action_space:
@@ -128,15 +206,17 @@ class ActorCritic(nn.Module):
         b = len(state)
         if self.has_continuous_action_space:
             action_mean, _ = self.actor(state)
-
-            action_var = self.action_var.expand_as(action_mean).reshape(b,-1,self.action_dim)
+            action_var = self.action_var.expand_as(action_mean)
             cov_mat = torch.diag_embed(action_var).to(device)
             dist = MultivariateNormal(action_mean, cov_mat)
-
         else:
             action_probs, _ = self.actor(state)
             dist = Categorical(action_probs)
-        action_logprobs = dist.log_prob(action)
+        if self.has_continuous_action_space:
+            action_logprobs = dist.log_prob(action)
+        else:
+            action_logprobs = dist.log_prob(action.squeeze())
+
         dist_entropy = dist.entropy()
         state_values, _ = self.critic(state)
 
@@ -145,7 +225,7 @@ class ActorCritic(nn.Module):
 
 class PPO:
     def __init__(self, state_dim, action_dim, lr_actor=5e-4, lr_critic=1e-3, gamma=0.99, K_epochs=80, eps_clip=0.3,
-                 has_continuous_action_space=True, action_std_init=0.6, hidden_space=128):
+                 has_continuous_action_space=True, action_std_init=0.6, hidden_space=128, batch_size=1):
 
         self.has_continuous_action_space = has_continuous_action_space
         self.action_dim = action_dim
@@ -155,8 +235,8 @@ class PPO:
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
-
-        self.buffer = RolloutBuffer()
+        self.batch_size = batch_size
+        self.buffer = PPOBuffer()
 
         self.policy = ActorCritic(state_dim, action_dim, has_continuous_action_space, action_std_init).to(device)
         self.optimizer = torch.optim.Adam([
@@ -211,81 +291,46 @@ class PPO:
                 state = torch.FloatTensor(state).to(device).unsqueeze(0).unsqueeze(0)
                 action, action_logprob, state_val, h_a,h_c = self.policy_old.act(state, deter, h_a,h_c)
 
-            self.buffer.states.append(state)
-            self.buffer.actions.append(action)
-            self.buffer.logprobs.append(action_logprob)
-            self.buffer.state_values.append(state_val)
-
-            return action.detach().cpu().numpy().flatten(), h_a, h_c
+            # self.buffer.states.append(state)
+            # self.buffer.actions.append(action)
+            # self.buffer.logprobs.append(action_logprob)
+            # self.buffer.state_values.append(state_val)
+            return action.detach().cpu().numpy().flatten(),action_logprob.detach().cpu().numpy(), state_val.detach().cpu().numpy(), h_a, h_c
         else:
             with torch.no_grad():
                 state = torch.FloatTensor(state).to(device).unsqueeze(0).unsqueeze(0)
                 action, action_logprob, state_val, h_a,h_c = self.policy_old.act(state, deter, h_a,h_c)
 
-            self.buffer.states.append(state)
-            self.buffer.actions.append(action)
-            self.buffer.logprobs.append(action_logprob)
-            self.buffer.state_values.append(state_val)
+            # self.buffer.states.append(state)
+            # self.buffer.actions.append(action)
+            # self.buffer.logprobs.append(action_logprob)
+            # self.buffer.state_values.append(state_val)
 
-            return action.item(), h_a, h_c
+            return action.item(),action_logprob.detach().cpu().numpy(), state_val.detach().cpu().numpy(), h_a, h_c
 
-    def get_rnn_sample(self, s,a,r,adv,logp,rewards, look_setup=20, batch_size = 128):
-        max_seq_len = len(s)
-        idxs = np.random.choice(list(range(max_seq_len - look_setup)),size=batch_size,replace=False)
-        new_s = []
-        new_a = []
-        new_r = []
-        new_adv = []
-        new_logp = []
-        new_rew = []
-        for idx in idxs:
-            new_s.append(s[idx:idx+look_setup])
-            new_a.append(a[idx:idx+look_setup])
-            new_r.append(r[idx:idx+look_setup])
-            new_adv.append(adv[idx:idx+look_setup])
-            new_logp.append(logp[idx:idx+look_setup])
-            new_rew.append(rewards[idx:idx+look_setup])
-        new_s = torch.stack(new_s).reshape(batch_size,look_setup,-1)
-        new_a = torch.stack(new_a).reshape(batch_size,look_setup,-1)
-        new_r = torch.stack(new_r).reshape(batch_size,look_setup,-1)
-        new_adv = torch.stack(new_adv).reshape(batch_size,look_setup,-1)
-        new_logp = torch.stack(new_logp).reshape(batch_size,look_setup,-1)
-        new_rew = torch.stack(new_rew).reshape(batch_size,look_setup,-1)
-
-        return new_s,new_a,new_r,new_adv,new_logp,new_rew
-
-    def update(self, look_setup=20, batch_size=128):
+    def update(self, look_setup=20):
         # Monte Carlo estimate of returns
-        rewards = []
-        discounted_reward = 0
-        for reward, is_terminal in zip(reversed(self.buffer.rewards), reversed(self.buffer.is_terminals)):
-            if is_terminal:
-                discounted_reward = 0
-            discounted_reward = reward + (self.gamma * discounted_reward)
-            rewards.insert(0, discounted_reward)
-        # Normalizing the rewards
-        rewards = torch.tensor(rewards, dtype=torch.float32).to(device)
-        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
-
-        # convert list to tensor
-        old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).detach().to(device).unsqueeze(0)
-        if self.has_continuous_action_space:
-            old_actions = torch.squeeze(torch.stack(self.buffer.actions, dim=0)).detach().to(device).unsqueeze(0).reshape(1,-1,self.action_dim)
-        else:
-            old_actions = torch.squeeze(torch.stack(self.buffer.actions, dim=0)).detach().to(device).unsqueeze(0).reshape(1,-1,1)
-
-        old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach().to(device).unsqueeze(0)
-        old_state_values = torch.squeeze(torch.stack(self.buffer.state_values, dim=0)).detach().to(device).unsqueeze(0)
-
-        # calculate advantages
-        advantages = rewards.detach() - old_state_values.detach()
-        # old_states,old_actions,old_state_values,advantages,old_logprobs,rewards = \
-        #     self.get_rnn_sample(old_states,old_actions,old_state_values,advantages,old_logprobs,rewards,look_setup,batch_size)
+        data = self.buffer.sample(look_setup)
+        old_states = data['obs']
+        old_actions = data['act']
+        old_logprobs = data['logp']
+        rewards = data['ret']
+        advantages = data['adv']
+        # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
         # Optimize policy for K epochs
         for _ in range(self.K_epochs):
             # Evaluating old actions and values
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
-
+            logprobs,state_values,dist_entropy = [],[],[]
+            for _ in range(self.batch_size):
+                logprob, state_value, dist_ent = self.policy.evaluate(old_states[_], old_actions[_])
+                logprobs.append(logprob)
+                state_values.append(state_value)
+                dist_entropy.append(dist_ent)
+            logprobs, state_values, dist_entropy = torch.stack(logprobs),torch.stack(state_values),torch.stack(dist_entropy)
+            logprobs = logprobs.reshape(self.batch_size,-1,1)
+            state_values = state_values.reshape(self.batch_size,-1,1)
+            dist_entropy = dist_entropy.reshape(self.batch_size,-1,1)
             # match state_values tensor dimensions with rewards tensor
             # state_values = torch.squeeze(state_values)
 
@@ -297,15 +342,15 @@ class PPO:
             surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
 
             # final loss of clipped objective RPPO
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values.squeeze(), rewards) - 0.01 * dist_entropy.unsqueeze(-1)
+            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
 
             # take gradient step
             self.optimizer.zero_grad()
             loss.mean().backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.actor.parameters(), max_norm=2)
-            torch.nn.utils.clip_grad_norm_(self.policy.critic.parameters(),max_norm=4)
-            self.optimizer.step()
+            torch.nn.utils.clip_grad_norm_(self.policy.actor.parameters(),max_norm=5)
+            torch.nn.utils.clip_grad_norm_(self.policy.critic.parameters(),max_norm=5)
 
+            self.optimizer.step()
         # Copy new weights into old policy
         self.policy_old.load_state_dict(self.policy.state_dict())
 
