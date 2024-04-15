@@ -207,13 +207,8 @@ class ActorCritic(nn.Module):
         if self.has_continuous_action_space:
             action_mean, _ = self.actor(state)
             action_var = self.action_var.expand_as(action_mean)
-<<<<<<< HEAD
             # cov_mat = torch.diag_embed(action_var).to(device)
             dist = Normal(action_mean, action_var)
-=======
-            cov_mat = torch.diag_embed(action_var).to(device)
-            dist = MultivariateNormal(action_mean, cov_mat)
->>>>>>> f14bbdc58a8b0f9d7496124702561ccd8c2a56bc
         else:
             action_probs, _ = self.actor(state)
             dist = Categorical(action_probs)
@@ -315,7 +310,6 @@ class PPO:
 
     def update(self, look_setup=20):
         # Monte Carlo estimate of returns
-<<<<<<< HEAD
         # Optimize policy for K epochs
         for _ in range(self.K_epochs):
             # Evaluating old actions and values
@@ -327,19 +321,6 @@ class PPO:
             advantages = data['adv']
             # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
-=======
-        data = self.buffer.sample(look_setup)
-        old_states = data['obs']
-        old_actions = data['act']
-        old_logprobs = data['logp']
-        rewards = data['ret']
-        advantages = data['adv']
-        # rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-5)
-        # Optimize policy for K epochs
-        for _ in range(self.K_epochs):
-            # Evaluating old actions and values
->>>>>>> f14bbdc58a8b0f9d7496124702561ccd8c2a56bc
             logprobs,state_values,dist_entropy = [],[],[]
             for _ in range(self.batch_size):
                 logprob, state_value, dist_ent = self.policy.evaluate(old_states[_], old_actions[_])
