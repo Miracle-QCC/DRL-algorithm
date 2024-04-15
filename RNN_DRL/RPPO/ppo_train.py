@@ -34,7 +34,7 @@ if __name__ == '__main__':
     MAX_EPISODE = int(1000)
     MAX_STEP = 200
     K_epochs = 40
-    look_setup = 20
+    look_setup = 40
 
     rewardList = []
     time_step = 0
