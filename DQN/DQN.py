@@ -133,10 +133,9 @@ class CloudManufacturingEnvironment:
         return self.state
 
 def run():
-    num_tasks = 30
-    num_resources_per_task = 30
-    input_size = num_tasks
-    output_size = num_resources_per_task
+
+    import gym
+    env = gym.make('CartPole-v1')
     params = {
         'gamma': 0.9,
         'epsi_high': 1.0,
@@ -145,16 +144,14 @@ def run():
         'lr': 0.001,
         'capacity': 1000000,
         'batch_size': 128,
-        'state_space_dim': input_size,
-        'action_space_dim': output_size,
+        'state_space_dim': env.observation_space.shape[0],
+        'action_space_dim': env.action_space.n,
     }
 
     agent = DDQN_Agent(**params)
-    env = CloudManufacturingEnvironment(num_tasks=num_tasks, num_resources_per_task=num_resources_per_task)
     totalreward = []
 
     num_episodes = 1000
-    batch_size = 64
     rewards = []
 
     for episode in range(num_episodes):
@@ -165,7 +162,7 @@ def run():
         while not done:
             action = agent.act(state)
             # print("action:",action)
-            next_state, reward, done = env.step(action)
+            next_state, reward, done,_ = env.step(action)
             # print("next_state:",next_state)
             agent.put(state, action, reward, next_state, done)
             state = next_state
