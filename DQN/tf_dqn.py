@@ -27,6 +27,19 @@ class DQN_Agent:
         self.action_space_dim = 2
         self.batch_size = 64
         self.steps = 0
+        self.tau = 0.02
+
+    def soft_update(self):
+        target_weights = self.q_tart.get_weights()
+        source_weights = self.q.get_weights()
+
+        # 计算加权平均后的参数
+        new_weights = []
+        for target, source in zip(target_weights, source_weights):
+            new_weights.append(target * (1 - self.tau) + source * self.tau)
+
+        # 将加权平均后的参数设置到目标网络中
+        self.q_tart.set_weights(new_weights)
 
     def hard_update(self):
         weights_model1 = self.q.get_weights()
@@ -80,6 +93,7 @@ class DQN_Agent:
 
         if self.steps % 50 == 0:
             self.hard_update()
+        self.soft_update()
         # ### 软更新taget
         # for p,p_targ in zip(self.q.parameters(), self.q_targ.parameters()):
         #     p_targ.data = (1 - self.tau) * p_targ.data + self.tau * p.data
